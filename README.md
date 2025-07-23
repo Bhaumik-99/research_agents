@@ -2,6 +2,8 @@
 
 An interactive Streamlit app that decomposes a research topic, performs detailed research using Google Gemini AI, and generates a professional summary report.
 
+### 🌐 Live App: [https://research-agents.streamlit.app](https://research-agents.streamlit.app)
+
 ---
 
 ## 🚀 Features
@@ -39,3 +41,9 @@ An interactive Streamlit app that decomposes a research topic, performs detailed
   ```bash
   pip install -r requirements.txt
   ```
+
+---
+
+## 📄 License
+
+This project is licensed under the **MIT License** — you are free to use, modify, and distribute it with attribution.
