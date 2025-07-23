@@ -110,7 +110,7 @@ def main():
             st.markdown("1. Visit [Google AI Studio](https://makersuite.google.com/app/apikey)")
             st.markdown("2. Create a new API key")
             st.markdown("3. Copy and paste it above")
-            st.markdown("Made with ❤️ by Bhaumik Snewal")
+            st.markdown("Made with ❤️ by Bhaumik Senwal")
             
             return
     
