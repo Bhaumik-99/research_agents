@@ -31,3 +31,11 @@ An interactive Streamlit app that decomposes a research topic, performs detailed
    ```bash
    git clone https://github.com/Bhaumik-99/research_agents.git
    cd research_agents
+   ```
+
+
+2. **Make sure you have **Python 3.8+** installed, then install the required libraries:**
+
+  ```bash
+  pip install -r requirements.txt
+  ```
