@@ -122,7 +122,7 @@ def main():
             return
         
         try:
-            model = genai.GenerativeModel('gemini-pro')
+            model = genai.GenerativeModel('gemini-1.5-flash')
             
             # Progress tracking
             progress_bar = st.progress(0)
