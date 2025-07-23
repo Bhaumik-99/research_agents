@@ -1,455 +1,193 @@
-# Real-Time AI Research System with WebSockets
-# Install: pip install fastapi uvicorn websockets langchain langchain-openai langchain-community asyncio
+import streamlit as st
+import google.generativeai as genai
+import time
+from typing import List, Dict
 
-import asyncio
-import json
-import logging
-from datetime import datetime
-from typing import Dict, List, Optional
-import uuid
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
-import uvicorn
-
-from langchain.agents import Tool, AgentExecutor, create_openai_functions_agent
-from langchain.schema import SystemMessage, HumanMessage
-from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_community.tools import WikipediaQueryRun
-from langchain_community.utilities import WikipediaAPIWrapper
-from langchain_community.tools.tavily_search import TavilySearchResults
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-class RealTimeResearchAgent:
-    def __init__(self, name: str, role: str, tools: List[Tool], llm: ChatOpenAI):
-        self.name = name
-        self.role = role
-        self.tools = tools
-        self.llm = llm
-        self.agent = self._create_agent()
-    
-    def _create_agent(self):
-        system_message = f"""You are {self.name}, a specialized research agent.
-        Role: {self.role}
-        
-        Provide concise, accurate research findings with clear sources.
-        Focus on actionable insights and current information.
-        Keep responses under 500 words for real-time delivery."""
-        
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_message),
-            ("human", "{input}"),
-            MessagesPlaceholder("agent_scratchpad")
-        ])
-        
-        agent = create_openai_functions_agent(self.llm, self.tools, prompt)
-        return AgentExecutor(agent=agent, tools=self.tools, verbose=False)
-    
-    async def research_async(self, query: str, websocket: WebSocket, agent_id: str) -> str:
-        """Perform research and send real-time updates via WebSocket"""
-        try:
-            # Notify start
-            await websocket.send_text(json.dumps({
-                "type": "agent_status",
-                "agent_id": agent_id,
-                "status": "researching",
-                "message": f"{self.name} is researching..."
-            }))
-            
-            # Perform research (this is the actual API call)
-            result = await asyncio.to_thread(
-                self.agent.invoke, 
-                {"input": query}
-            )
-            
-            # Send result in real-time
-            await websocket.send_text(json.dumps({
-                "type": "research_result",
-                "agent_id": agent_id,
-                "agent_name": self.name,
-                "result": result["output"]
-            }))
-            
-            # Notify completion
-            await websocket.send_text(json.dumps({
-                "type": "agent_status",
-                "agent_id": agent_id,
-                "status": "completed",
-                "message": f"{self.name} completed research"
-            }))
-            
-            return result["output"]
-            
-        except Exception as e:
-            error_msg = f"Error in {self.name}: {str(e)}"
-            await websocket.send_text(json.dumps({
-                "type": "agent_error",
-                "agent_id": agent_id,
-                "error": error_msg
-            }))
-            return error_msg
-
-class RealTimeResearchTeam:
-    def __init__(self):
-        self.llm = ChatOpenAI(
-        temperature=0.1,
-        model="gpt-3.5-turbo",
-        openai_api_key=''  # <- Injected from .env
-    )
-        self.agents = self._create_agents()
-        self.active_sessions: Dict[str, Dict] = {}
-    
-    def _create_agents(self):
-        # Create tools
-        wikipedia = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
-        
-        try:
-            tavily_search = TavilySearchResults(max_results=3)
-        except:
-            tavily_search = Tool(
-                name="web_search",
-                description="Search the web for information",
-                func=lambda x: "Configure Tavily API key for web search"
-            )
-        
-        # Create agents
-        agents = {
-            "researcher": RealTimeResearchAgent(
-                name="Primary Researcher",
-                role="Gather comprehensive background information",
-                tools=[wikipedia, tavily_search],
-                llm=self.llm
-            ),
-            "analyst": RealTimeResearchAgent(
-                name="Data Analyst", 
-                role="Analyze trends and statistics",
-                tools=[tavily_search],
-                llm=self.llm
-            ),
-            "news_tracker": RealTimeResearchAgent(
-                name="News Tracker",
-                role="Find recent developments and news",
-                tools=[tavily_search],
-                llm=self.llm
-            ),
-            "synthesizer": RealTimeResearchAgent(
-                name="Information Synthesizer",
-                role="Combine and synthesize all findings",
-                tools=[],
-                llm=self.llm
-            )
-        }
-        
-        return agents
-    
-    async def conduct_realtime_research(self, topic: str, focus: str, websocket: WebSocket, session_id: str):
-        """Conduct research with real-time updates"""
-        try:
-            # Initialize session
-            self.active_sessions[session_id] = {
-                "topic": topic,
-                "focus": focus,
-                "start_time": datetime.now(),
-                "results": {}
-            }
-            
-            # Send start notification
-            await websocket.send_text(json.dumps({
-                "type": "research_started",
-                "session_id": session_id,
-                "topic": topic,
-                "message": "Research team activated"
-            }))
-            
-            # Phase 1: Parallel research by individual agents
-            research_tasks = {
-                "researcher": f"Research comprehensive background about {topic}. {focus if focus else ''}",
-                "analyst": f"Analyze data, trends, and statistics for {topic}. {focus if focus else ''}",
-                "news_tracker": f"Find recent news and developments about {topic}. {focus if focus else ''}"
-            }
-            
-            # Run agents in parallel with real-time updates
-            tasks = []
-            for agent_id, query in research_tasks.items():
-                task = asyncio.create_task(
-                    self.agents[agent_id].research_async(query, websocket, agent_id)
-                )
-                tasks.append(task)
-            
-            # Wait for all individual research to complete
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Store results
-            for i, agent_id in enumerate(research_tasks.keys()):
-                if not isinstance(results[i], Exception):
-                    self.active_sessions[session_id]["results"][agent_id] = results[i]
-            
-            # Phase 2: Synthesis (after individual research completes)
-            synthesis_query = f"""
-            Based on research about {topic}, synthesize these findings:
-            
-            Background: {self.active_sessions[session_id]["results"].get("researcher", "No data")}
-            Analysis: {self.active_sessions[session_id]["results"].get("analyst", "No data")}
-            News: {self.active_sessions[session_id]["results"].get("news_tracker", "No data")}
-            
-            Provide a comprehensive summary combining all insights.
-            """
-            
-            synthesis_result = await self.agents["synthesizer"].research_async(
-                synthesis_query, websocket, "synthesizer"
-            )
-            
-            self.active_sessions[session_id]["results"]["synthesizer"] = synthesis_result
-            
-            # Send completion notification
-            await websocket.send_text(json.dumps({
-                "type": "research_completed",
-                "session_id": session_id,
-                "message": "All research completed successfully"
-            }))
-            
-        except Exception as e:
-            logger.error(f"Error in research: {str(e)}")
-            await websocket.send_text(json.dumps({
-                "type": "research_error",
-                "session_id": session_id,
-                "error": str(e)
-            }))
-
-# FastAPI app
-app = FastAPI(title="Real-Time AI Research System")
-
-# Initialize research team
-research_team = RealTimeResearchTeam()
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    session_id = str(uuid.uuid4())
-    
+def configure_genai(api_key: str):
+    """Configure Google Generative AI with API key"""
     try:
-        while True:
-            # Receive message from client
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            
-            if message["type"] == "start_research":
-                topic = message.get("topic", "")
-                focus = message.get("focus", "")
-                
-                if not topic:
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "message": "Topic is required"
-                    }))
-                    continue
-                
-                # Start research in background
-                asyncio.create_task(
-                    research_team.conduct_realtime_research(
-                        topic, focus, websocket, session_id
-                    )
-                )
-            
-            elif message["type"] == "ping":
-                await websocket.send_text(json.dumps({
-                    "type": "pong",
-                    "timestamp": datetime.now().isoformat()
-                }))
-    
-    except WebSocketDisconnect:
-        logger.info(f"Client disconnected: {session_id}")
-        if session_id in research_team.active_sessions:
-            del research_team.active_sessions[session_id]
+        genai.configure(api_key=api_key)
+        return True
     except Exception as e:
-        logger.error(f"WebSocket error: {str(e)}")
+        st.error(f"Error configuring Gemini API: {str(e)}")
+        return False
 
-@app.get("/")
-async def get_homepage():
-    return HTMLResponse(content="""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Real-Time AI Research System</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-            .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; }
-            .header { text-align: center; margin-bottom: 30px; }
-            .form-group { margin-bottom: 15px; }
-            label { display: block; margin-bottom: 5px; font-weight: bold; }
-            input, textarea { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
-            button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }
-            button:hover { background: #0056b3; }
-            .agents { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin: 20px 0; }
-            .agent { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #007bff; }
-            .agent.active { border-left-color: #28a745; background: #d4edda; }
-            .agent.completed { border-left-color: #6c757d; background: #e2e3e5; }
-            .results { margin-top: 20px; }
-            .result-section { background: #f8f9fa; padding: 15px; margin: 10px 0; border-radius: 8px; }
-            .status { font-weight: bold; color: #666; }
-            .error { color: #dc3545; background: #f8d7da; padding: 10px; border-radius: 5px; }
-            .success { color: #155724; background: #d4edda; padding: 10px; border-radius: 5px; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>🔬 Real-Time AI Research System</h1>
-                <p>Watch AI agents research your topic in real-time</p>
-            </div>
-            
-            <div class="form-group">
-                <label>Research Topic:</label>
-                <input type="text" id="topic" placeholder="e.g., Climate Change Impact on Agriculture">
-            </div>
-            
-            <div class="form-group">
-                <label>Focus (optional):</label>
-                <textarea id="focus" rows="3" placeholder="Specific aspects to focus on..."></textarea>
-            </div>
-            
-            <button onclick="startResearch()">Start Real-Time Research</button>
-            
-            <div class="agents">
-                <div class="agent" id="researcher">
-                    <h3>🔍 Primary Researcher</h3>
-                    <div class="status" id="researcher-status">Ready</div>
-                </div>
-                <div class="agent" id="analyst">
-                    <h3>📊 Data Analyst</h3>
-                    <div class="status" id="analyst-status">Ready</div>
-                </div>
-                <div class="agent" id="news_tracker">
-                    <h3>📰 News Tracker</h3>
-                    <div class="status" id="news_tracker-status">Ready</div>
-                </div>
-                <div class="agent" id="synthesizer">
-                    <h3>🔄 Synthesizer</h3>
-                    <div class="status" id="synthesizer-status">Ready</div>
-                </div>
-            </div>
-            
-            <div class="results" id="results"></div>
-        </div>
+def decomposer_agent(topic: str, model) -> List[str]:
+    """Breaks the main topic into 3-5 sub-topics"""
+    try:
+        prompt = f"""
+        You are a research decomposer agent. Break down the following research topic into 3-5 specific, focused sub-topics that would provide comprehensive coverage of the main topic.
         
-        <script>
-            let ws;
-            let isConnected = false;
+        Topic: {topic}
+        
+        Return only the sub-topics as a numbered list, nothing else. Each sub-topic should be specific and researchable.
+        """
+        
+        response = model.generate_content(prompt)
+        subtopics = []
+        
+        for line in response.text.strip().split('\n'):
+            line = line.strip()
+            if line and (line[0].isdigit() or line.startswith('-') or line.startswith('•')):
+                # Remove numbering and formatting
+                clean_topic = line.split('.', 1)[-1].strip() if '.' in line else line.strip('- •').strip()
+                if clean_topic:
+                    subtopics.append(clean_topic)
+        
+        return subtopics[:5]  # Ensure max 5 subtopics
+        
+    except Exception as e:
+        st.error(f"Error in DecomposerAgent: {str(e)}")
+        return []
+
+def research_agent(subtopic: str, model) -> str:
+    """Researches a specific sub-topic and provides detailed information"""
+    try:
+        prompt = f"""
+        You are a research agent. Conduct thorough research on the following sub-topic and provide a detailed, informative paragraph with key facts, statistics, and insights.
+        
+        Sub-topic: {subtopic}
+        
+        Provide a comprehensive paragraph (150-250 words) with factual information, current trends, and important details about this sub-topic. Focus on accuracy and depth.
+        """
+        
+        response = model.generate_content(prompt)
+        return response.text.strip()
+        
+    except Exception as e:
+        st.error(f"Error researching {subtopic}: {str(e)}")
+        return f"Error occurred while researching {subtopic}"
+
+def summarizer_agent(topic: str, research_results: Dict[str, str], model) -> str:
+    """Summarizes all research findings into a cohesive report"""
+    try:
+        research_text = ""
+        for subtopic, research in research_results.items():
+            research_text += f"\n\n**{subtopic}:**\n{research}"
+        
+        prompt = f"""
+        You are a summarizer agent. Create a comprehensive, cohesive research report based on the following research findings about "{topic}".
+        
+        Research Findings:{research_text}
+        
+        Create a well-structured summary report that:
+        1. Provides an executive summary
+        2. Integrates all the research findings coherently
+        3. Highlights key insights and connections between sub-topics
+        4. Concludes with implications or future considerations
+        
+        The report should be 400-600 words and professionally written.
+        """
+        
+        response = model.generate_content(prompt)
+        return response.text.strip()
+        
+    except Exception as e:
+        st.error(f"Error in SummarizerAgent: {str(e)}")
+        return "Error occurred while creating summary report"
+
+def main():
+    st.set_page_config(page_title="AI Research Team System", page_icon="🔬", layout="wide")
+    
+    st.title("🔬 AI Research Team System")
+    st.markdown("*Powered by Google Gemini API*")
+    
+    # Sidebar for API key
+    with st.sidebar:
+        st.header("Configuration")
+        api_key = st.text_input("Enter your Google Gemini API Key:", type="password", placeholder="Your API key here...")
+        
+        if api_key:
+            if configure_genai(api_key):
+                st.success("✅ API configured successfully!")
+            else:
+                st.error("❌ Invalid API key")
+                return
+        else:
+            st.warning("Please enter your Gemini API key to continue")
+            st.markdown("---")
+            st.markdown("**How to get API key:**")
+            st.markdown("1. Visit [Google AI Studio](https://makersuite.google.com/app/apikey)")
+            st.markdown("2. Create a new API key")
+            st.markdown("3. Copy and paste it above")
+            return
+    
+    # Main interface
+    st.header("Research Topic Input")
+    topic = st.text_input("Enter your research topic:", placeholder="e.g., Artificial Intelligence in Healthcare")
+    
+    if st.button("🚀 Start Research", type="primary"):
+        if not topic:
+            st.error("Please enter a research topic")
+            return
+        
+        try:
+            model = genai.GenerativeModel('gemini-pro')
             
-            function connectWebSocket() {
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const wsUrl = `${protocol}//${window.location.host}/ws`;
-                
-                ws = new WebSocket(wsUrl);
-                
-                ws.onopen = function() {
-                    isConnected = true;
-                    console.log('WebSocket connected');
-                };
-                
-                ws.onmessage = function(event) {
-                    const data = JSON.parse(event.data);
-                    handleMessage(data);
-                };
-                
-                ws.onclose = function() {
-                    isConnected = false;
-                    console.log('WebSocket disconnected');
-                };
-                
-                ws.onerror = function(error) {
-                    console.error('WebSocket error:', error);
-                };
-            }
+            # Progress tracking
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            function handleMessage(data) {
-                const resultsDiv = document.getElementById('results');
-                
-                switch(data.type) {
-                    case 'research_started':
-                        resultsDiv.innerHTML = '<div class="success">Research started for: ' + data.topic + '</div>';
-                        break;
-                        
-                    case 'agent_status':
-                        const agentDiv = document.getElementById(data.agent_id);
-                        const statusDiv = document.getElementById(data.agent_id + '-status');
-                        
-                        if (data.status === 'researching') {
-                            agentDiv.className = 'agent active';
-                            statusDiv.textContent = 'Researching...';
-                        } else if (data.status === 'completed') {
-                            agentDiv.className = 'agent completed';
-                            statusDiv.textContent = 'Completed';
-                        }
-                        break;
-                        
-                    case 'research_result':
-                        const resultDiv = document.createElement('div');
-                        resultDiv.className = 'result-section';
-                        resultDiv.innerHTML = `
-                            <h3>${data.agent_name}</h3>
-                            <p>${data.result}</p>
-                            <small>Received: ${new Date().toLocaleTimeString()}</small>
-                        `;
-                        resultsDiv.appendChild(resultDiv);
-                        break;
-                        
-                    case 'research_completed':
-                        resultsDiv.insertAdjacentHTML('beforeend', '<div class="success">All research completed!</div>');
-                        break;
-                        
-                    case 'agent_error':
-                    case 'research_error':
-                        resultsDiv.insertAdjacentHTML('beforeend', `<div class="error">Error: ${data.error}</div>`);
-                        break;
-                }
-            }
+            # Step 1: Decompose topic
+            status_text.text("🔍 DecomposerAgent: Breaking down the topic...")
+            progress_bar.progress(20)
             
-            function startResearch() {
-                if (!isConnected) {
-                    alert('WebSocket not connected. Please refresh the page.');
-                    return;
-                }
-                
-                const topic = document.getElementById('topic').value;
-                const focus = document.getElementById('focus').value;
-                
-                if (!topic.trim()) {
-                    alert('Please enter a research topic');
-                    return;
-                }
-                
-                // Reset UI
-                document.getElementById('results').innerHTML = '';
-                const agents = ['researcher', 'analyst', 'news_tracker', 'synthesizer'];
-                agents.forEach(agent => {
-                    document.getElementById(agent).className = 'agent';
-                    document.getElementById(agent + '-status').textContent = 'Ready';
-                });
-                
-                // Start research
-                ws.send(JSON.stringify({
-                    type: 'start_research',
-                    topic: topic,
-                    focus: focus
-                }));
-            }
+            subtopics = decomposer_agent(topic, model)
             
-            // Connect WebSocket on page load
-            window.addEventListener('load', connectWebSocket);
-        </script>
-    </body>
-    </html>
-    """)
+            if not subtopics:
+                st.error("Failed to decompose the topic. Please try again.")
+                return
+            
+            st.subheader("📋 Sub-topics Identified")
+            for i, subtopic in enumerate(subtopics, 1):
+                st.write(f"{i}. {subtopic}")
+            
+            # Step 2: Research each sub-topic
+            status_text.text("📚 ResearchAgent: Conducting detailed research...")
+            progress_bar.progress(40)
+            
+            research_results = {}
+            
+            st.subheader("🔬 Research Results")
+            
+            for i, subtopic in enumerate(subtopics):
+                with st.expander(f"Research: {subtopic}", expanded=True):
+                    with st.spinner(f"Researching {subtopic}..."):
+                        research_result = research_agent(subtopic, model)
+                        research_results[subtopic] = research_result
+                        st.write(research_result)
+                
+                # Update progress
+                progress_value = 40 + (i + 1) * (40 / len(subtopics))
+                progress_bar.progress(int(progress_value))
+                time.sleep(0.5)  # Small delay to show progress
+            
+            # Step 3: Summarize findings
+            status_text.text("📝 SummarizerAgent: Creating comprehensive report...")
+            progress_bar.progress(90)
+            
+            with st.spinner("Generating final summary..."):
+                final_summary = summarizer_agent(topic, research_results, model)
+            
+            progress_bar.progress(100)
+            status_text.text("✅ Research complete!")
+            
+            # Display final summary
+            st.subheader("📊 Final Research Report")
+            st.markdown("---")
+            st.markdown(final_summary)
+            
+            # Download option
+            st.download_button(
+                label="📥 Download Report",
+                data=f"# Research Report: {topic}\n\n{final_summary}",
+                file_name=f"research_report_{topic.replace(' ', '_')}.md",
+                mime="text/markdown"
+            )
+            
+        except Exception as e:
+            st.error(f"An error occurred during research: {str(e)}")
+            st.info("Please check your API key and try again.")
 
 if __name__ == "__main__":
-    print("Starting Real-Time AI Research System...")
-    print("Make sure to set your OpenAI API key: export OPENAI_API_KEY='your-key'")
-    print("Optional: Set Tavily API key: export TAVILY_API_KEY='your-key'")
-    
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    main()
