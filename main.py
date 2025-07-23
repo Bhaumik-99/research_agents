@@ -110,6 +110,8 @@ def main():
             st.markdown("1. Visit [Google AI Studio](https://makersuite.google.com/app/apikey)")
             st.markdown("2. Create a new API key")
             st.markdown("3. Copy and paste it above")
+            st.markdown("Made with ❤️ by Bhaumik Snewal")
+            
             return
     
     # Main interface
@@ -179,7 +181,7 @@ def main():
             
             # Download option
             st.download_button(
-                label="📥 Download Report",
+                label="📥 Download Text Report",
                 data=f"# Research Report: {topic}\n\n{final_summary}",
                 file_name=f"research_report_{topic.replace(' ', '_')}.md",
                 mime="text/markdown"
